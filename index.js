@@ -176,9 +176,9 @@ async function getAIResponse(userId, userMessage) {
       temperature: 0.85,
     });
 
-    // 2 秒 timeout，避免等太久
+    // 3.5 秒 timeout，避免等太久
     const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('SiliconFlow timeout')), 2000),
+      setTimeout(() => reject(new Error('SiliconFlow timeout')), 3500),
     );
 
     const response = await Promise.race([aiPromise, timeoutPromise]);
