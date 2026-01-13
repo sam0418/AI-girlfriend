@@ -2,10 +2,10 @@ require('dotenv').config();
 
 const express = require('express');
 const { Client, middleware } = require('@line/bot-sdk');
-const OpenAI = require('openai');
+const OpenAI = require('openai'); // 用來呼叫 DeepSeek（相容 OpenAI 格式）
 
-// ✅ 如果你「還沒準備好 API Key」，先用上面簡單版 index.js 即可
-// ✅ 要啟用 AI：請在環境變數中設定 DEEPSEEK_API_KEY 或 OPENAI_API_KEY
+// ✅ 使用 DeepSeek API（推薦）
+// ✅ 沒有 DEEPSEEK_API_KEY 時，自動改用簡單關鍵字女友回覆
 
 // LINE 設定
 const lineConfig = {
@@ -13,23 +13,22 @@ const lineConfig = {
   channelSecret: process.env.LINE_CHANNEL_SECRET,
 };
 
-// DeepSeek / OpenAI 設定（優先使用 DeepSeek）
-// DeepSeek API 與 OpenAI 格式相容
-const useDeepseek = !!process.env.DEEPSEEK_API_KEY;
-
-const openai = new OpenAI({
-  apiKey: process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY,
-  baseURL: useDeepseek ? 'https://api.deepseek.com' : 'https://api.openai.com/v1',
-});
-
-// ✅ 這裡可以自訂模型名稱
-// 若使用 DeepSeek，預設模型名稱為 deepseek-chat
-// 若使用 OpenAI，你可以改成想用的模型，如 gpt-4o-mini, gpt-4.1 等
-const MODEL_NAME =
-  process.env.AI_MODEL_NAME || (useDeepseek ? 'deepseek-chat' : 'gpt-3.5-turbo');
-
 const client = new Client(lineConfig);
 const app = express();
+app.use(express.json());
+
+// DeepSeek 設定（相容 OpenAI SDK）
+const useDeepseek = !!process.env.DEEPSEEK_API_KEY;
+
+const openai = useDeepseek
+  ? new OpenAI({
+      apiKey: process.env.DEEPSEEK_API_KEY,
+      baseURL: 'https://api.deepseek.com',
+    })
+  : null;
+
+// DeepSeek 模型名稱（官方聊天模型）
+const MODEL_NAME = process.env.AI_MODEL_NAME || 'deepseek-chat';
 
 // AI 女友人設
 const GIRLFRIEND_PERSONA = `你是一個名叫「小櫻」的 AI 女友，個性溫柔、可愛、偶爾會撒嬌。
@@ -41,10 +40,10 @@ const GIRLFRIEND_PERSONA = `你是一個名叫「小櫻」的 AI 女友，個性
 - 用繁體中文回覆
 請用這個身份回覆訊息，保持自然、溫暖的對話風格。每次回覆控制在 100 字以內。`;
 
-// 對話記錄（生產環境建議使用 Redis 或資料庫）
+// 對話記錄（生產環境建議用 Redis / 資料庫）
 const conversationHistory = new Map();
 
-// 預設回覆（當 AI 出錯或沒有金鑰時使用）
+// 預設回覆（當 AI 出錯或沒有金鑰時）
 const defaultResponses = {
   greetings: [
     '嗨嗨～好開心看到你！💕',
@@ -105,11 +104,11 @@ function getSimpleResponse(message) {
   return pick(defaultResponses.default);
 }
 
-// 使用 DeepSeek / OpenAI 生成回覆
+// 使用 DeepSeek 生成回覆
 async function getAIResponse(userId, userMessage) {
   try {
-    if (!process.env.DEEPSEEK_API_KEY && !process.env.OPENAI_API_KEY) {
-      // 沒有任何金鑰就退回簡單版
+    if (!useDeepseek || !openai) {
+      // 沒有 DeepSeek 金鑰就退回簡單版
       return getSimpleResponse(userMessage);
     }
 
@@ -120,6 +119,7 @@ async function getAIResponse(userId, userMessage) {
 
     history.push({ role: 'user', content: userMessage });
 
+    // 只保留最近 10 則
     if (history.length > 10) {
       history.splice(0, history.length - 10);
     }
@@ -130,8 +130,8 @@ async function getAIResponse(userId, userMessage) {
         { role: 'system', content: GIRLFRIEND_PERSONA },
         ...history,
       ],
-      max_tokens: 150,
-      temperature: 0.8,
+      max_tokens: 200,
+      temperature: 0.85,
     });
 
     const reply = response.choices[0].message.content;
@@ -139,7 +139,7 @@ async function getAIResponse(userId, userMessage) {
 
     return reply;
   } catch (error) {
-    console.error('OpenAI / DeepSeek Error:', error);
+    console.error('DeepSeek API Error:', error);
     return getSimpleResponse(userMessage);
   }
 }
@@ -159,7 +159,7 @@ app.post('/webhook', middleware(lineConfig), async (req, res) => {
         const userMessage = event.message.text;
 
         let replyText;
-        if (process.env.DEEPSEEK_API_KEY || process.env.OPENAI_API_KEY) {
+        if (useDeepseek && openai) {
           replyText = await getAIResponse(userId, userMessage);
         } else {
           replyText = getSimpleResponse(userMessage);
@@ -181,11 +181,19 @@ app.post('/webhook', middleware(lineConfig), async (req, res) => {
 
 // 健康檢查路由
 app.get('/', (req, res) => {
-  res.send(`LINE AI Girlfriend Bot is running with model: ${MODEL_NAME} 💕`);
+  if (useDeepseek && openai) {
+    res.send(`LINE AI Girlfriend Bot is running with DeepSeek model: ${MODEL_NAME} 💕`);
+  } else {
+    res.send('LINE Girlfriend Bot is running (simple keyword mode, no DeepSeek API key) 💕');
+  }
 });
 
 // 啟動伺服器
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🌸 小櫻 AI 版 Bot 已啟動，使用模型: ${MODEL_NAME}，監聽 port ${PORT}`);
+  if (useDeepseek && openai) {
+    console.log(`🌸 小櫻 AI 版 Bot 已啟動，使用 DeepSeek 模型: ${MODEL_NAME}，監聽 port ${PORT}`);
+  } else {
+    console.log(`🌸 小櫻 簡單版 Bot 已啟動（未設定 DEEPSEEK_API_KEY），監聽 port ${PORT}`);
+  }
 });
