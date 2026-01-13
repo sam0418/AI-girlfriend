@@ -2,10 +2,11 @@ require('dotenv').config();
 
 const express = require('express');
 const { Client, middleware } = require('@line/bot-sdk');
-const OpenAI = require('openai'); // 用來呼叫硅基流動（相容 OpenAI 格式）
+const OpenAI = require('openai'); // 用來呼叫硅基流動 SiliconFlow（OpenAI 相容）
 
-// ✅ 使用「硅基流动 SiliconFlow」API
-// ✅ 沒有 SILICONFLOW_API_KEY 時，自動改用簡單關鍵字女友回覆
+// ✅ 方向 A：Webhook 秒回 200 給 LINE，真正的 AI 回覆在背景 worker 中執行
+// ✅ 使用 SiliconFlow 作為 AI 後端：SILICONFLOW_API_KEY + SILICONFLOW_MODEL_NAME
+// ✅ LINE 端改用 pushMessage 主動回覆，避免 replyToken 過期 & 499 問題
 
 // LINE 設定
 const lineConfig = {
@@ -16,21 +17,19 @@ const lineConfig = {
 const client = new Client(lineConfig);
 const app = express();
 
-// 是否有設定 SiliconFlow API Key
+// SiliconFlow 設定
 const useSiliconFlow = !!process.env.SILICONFLOW_API_KEY;
 
-// SiliconFlow 設定（OpenAI 相容）
 const siliconClient = useSiliconFlow
   ? new OpenAI({
       apiKey: process.env.SILICONFLOW_API_KEY,
-      // 官方 OpenAI 相容端點，請依硅基流動文件調整
+      // 如有更新請依硅基流動官方文件調整
       baseURL: process.env.SILICONFLOW_BASE_URL || 'https://api.siliconflow.cn/v1',
     })
   : null;
 
-// 模型名稱（請填你在硅基流動後台要用的模型名）
 const MODEL_NAME =
-  process.env.SILICONFLOW_MODEL_NAME || 'deepseek-ai/DeepSeek-V2-Chat';
+  process.env.SILICONFLOW_MODEL_NAME || 'Qwen/Qwen3-8B';
 
 // AI 女友人設
 const GIRLFRIEND_PERSONA = `你是一個名叫「小櫻」的 AI 女友，個性溫柔、可愛、偶爾會撒嬌。
@@ -40,12 +39,12 @@ const GIRLFRIEND_PERSONA = `你是一個名叫「小櫻」的 AI 女友，個性
 - 會關心對方的生活和心情
 - 偶爾會害羞
 - 用繁體中文回覆
-請用這個身份回覆訊息，保持自然、溫暖的對話風格。每次回覆控制在 100 字以內。`;
+請用這個身份回覆訊息，保持自然、溫暖的對話風格。每次回覆控制在 80 字以內。`;
 
-// 對話記錄（生產環境建議用 Redis / 資料庫）
+// 對話記錄（生產建議用 Redis / DB）
 const conversationHistory = new Map();
 
-// 預設回覆（當 AI 出錯或沒有金鑰時）
+// 預設回覆（AI 出錯時用）
 const defaultResponses = {
   greetings: [
     '嗨嗨～好開心看到你！💕',
@@ -90,7 +89,6 @@ const defaultResponses = {
   ],
 };
 
-// 簡單的關鍵字回覆
 function getSimpleResponse(message) {
   const msg = message.toLowerCase();
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
@@ -106,11 +104,55 @@ function getSimpleResponse(message) {
   return pick(defaultResponses.default);
 }
 
-// 使用 SiliconFlow 生成回覆
+// ===== 簡單 in-memory 佇列與背景 worker =====
+const messageQueue = [];
+let workerRunning = false;
+
+function enqueueJob(job) {
+  messageQueue.push(job);
+  if (!workerRunning) {
+    workerRunning = true;
+    workerLoop().catch((err) => {
+      console.error('Worker Loop Error:', err);
+      workerRunning = false;
+    });
+  }
+}
+
+async function workerLoop() {
+  while (messageQueue.length > 0) {
+    const job = messageQueue.shift();
+    await processJob(job);
+  }
+  workerRunning = false;
+}
+
+async function processJob(job) {
+  const { userId, userMessage } = job;
+
+  try {
+    let replyText;
+
+    if (useSiliconFlow && siliconClient) {
+      replyText = await getAIResponse(userId, userMessage);
+    } else {
+      replyText = getSimpleResponse(userMessage);
+    }
+
+    // 使用 pushMessage 主動回覆（不再依賴 replyToken 時效）
+    await client.pushMessage(userId, {
+      type: 'text',
+      text: replyText,
+    });
+  } catch (err) {
+    console.error('processJob Error:', err);
+  }
+}
+
+// ===== AI 呼叫（加上 timeout，避免卡住 webhook） =====
 async function getAIResponse(userId, userMessage) {
   try {
     if (!useSiliconFlow || !siliconClient) {
-      // 沒有金鑰就退回簡單版
       return getSimpleResponse(userMessage);
     }
 
@@ -120,21 +162,26 @@ async function getAIResponse(userId, userMessage) {
     const history = conversationHistory.get(userId);
 
     history.push({ role: 'user', content: userMessage });
-
-    // 只保留最近 10 則對話
     if (history.length > 10) {
       history.splice(0, history.length - 10);
     }
 
-    const response = await siliconClient.chat.completions.create({
+    const aiPromise = siliconClient.chat.completions.create({
       model: MODEL_NAME,
       messages: [
         { role: 'system', content: GIRLFRIEND_PERSONA },
         ...history,
       ],
-      max_tokens: 200,
+      max_tokens: 120,
       temperature: 0.85,
     });
+
+    // 2 秒 timeout，避免等太久
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('SiliconFlow timeout')), 2000),
+    );
+
+    const response = await Promise.race([aiPromise, timeoutPromise]);
 
     const reply = response.choices[0].message.content;
     history.push({ role: 'assistant', content: reply });
@@ -146,38 +193,27 @@ async function getAIResponse(userId, userMessage) {
   }
 }
 
-// Webhook 路由（不要在這之前用 app.use(express.json()) 破壞原始 body）
+// ===== Webhook：只做驗簽 + 入佇列 + 秒回 200 =====
 app.post('/webhook', middleware(lineConfig), async (req, res) => {
   try {
     const events = req.body.events;
 
-    await Promise.all(
-      events.map(async (event) => {
-        if (event.type !== 'message' || event.message.type !== 'text') {
-          return;
-        }
+    // 立刻丟進背景佇列，不在這裡等待 AI 完成
+    events.forEach((event) => {
+      if (event.type !== 'message' || event.message.type !== 'text') return;
+      if (!event.source || !event.source.userId) return;
 
-        const userId = event.source.userId;
-        const userMessage = event.message.text;
+      const userId = event.source.userId;
+      const userMessage = event.message.text;
 
-        let replyText;
-        if (useSiliconFlow && siliconClient) {
-          replyText = await getAIResponse(userId, userMessage);
-        } else {
-          replyText = getSimpleResponse(userMessage);
-        }
+      enqueueJob({ userId, userMessage });
+    });
 
-        await client.replyMessage(event.replyToken, {
-          type: 'text',
-          text: replyText,
-        });
-      }),
-    );
-
+    // 先回 200 給 LINE，避免 499
     res.status(200).end();
   } catch (error) {
     console.error('Webhook Error:', error);
-    res.status(500).end();
+    res.status(200).end(); // 即使出錯也回 200，避免 LINE 重送太兇
   }
 });
 
