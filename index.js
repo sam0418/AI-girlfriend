@@ -15,7 +15,7 @@ const lineConfig = {
 
 const client = new Client(lineConfig);
 const app = express();
-app.use(express.json());
+// app.use(express.json());
 
 // DeepSeek 設定（相容 OpenAI SDK）
 const useDeepseek = !!process.env.DEEPSEEK_API_KEY;
