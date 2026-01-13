@@ -2,10 +2,10 @@ require('dotenv').config();
 
 const express = require('express');
 const { Client, middleware } = require('@line/bot-sdk');
-const OpenAI = require('openai'); // 用來呼叫 DeepSeek（相容 OpenAI 格式）
+const OpenAI = require('openai'); // 用來呼叫硅基流動（相容 OpenAI 格式）
 
-// ✅ 使用 DeepSeek API（推薦）
-// ✅ 沒有 DEEPSEEK_API_KEY 時，自動改用簡單關鍵字女友回覆
+// ✅ 使用「硅基流动 SiliconFlow」API
+// ✅ 沒有 SILICONFLOW_API_KEY 時，自動改用簡單關鍵字女友回覆
 
 // LINE 設定
 const lineConfig = {
@@ -15,20 +15,22 @@ const lineConfig = {
 
 const client = new Client(lineConfig);
 const app = express();
-// app.use(express.json());
 
-// DeepSeek 設定（相容 OpenAI SDK）
-const useDeepseek = !!process.env.DEEPSEEK_API_KEY;
+// 是否有設定 SiliconFlow API Key
+const useSiliconFlow = !!process.env.SILICONFLOW_API_KEY;
 
-const openai = useDeepseek
+// SiliconFlow 設定（OpenAI 相容）
+const siliconClient = useSiliconFlow
   ? new OpenAI({
-      apiKey: process.env.DEEPSEEK_API_KEY,
-      baseURL: 'https://api.deepseek.com',
+      apiKey: process.env.SILICONFLOW_API_KEY,
+      // 官方 OpenAI 相容端點，請依硅基流動文件調整
+      baseURL: process.env.SILICONFLOW_BASE_URL || 'https://api.siliconflow.cn/v1',
     })
   : null;
 
-// DeepSeek 模型名稱（官方聊天模型）
-const MODEL_NAME = process.env.AI_MODEL_NAME || 'deepseek-chat';
+// 模型名稱（請填你在硅基流動後台要用的模型名）
+const MODEL_NAME =
+  process.env.SILICONFLOW_MODEL_NAME || 'deepseek-ai/DeepSeek-V2-Chat';
 
 // AI 女友人設
 const GIRLFRIEND_PERSONA = `你是一個名叫「小櫻」的 AI 女友，個性溫柔、可愛、偶爾會撒嬌。
@@ -104,11 +106,11 @@ function getSimpleResponse(message) {
   return pick(defaultResponses.default);
 }
 
-// 使用 DeepSeek 生成回覆
+// 使用 SiliconFlow 生成回覆
 async function getAIResponse(userId, userMessage) {
   try {
-    if (!useDeepseek || !openai) {
-      // 沒有 DeepSeek 金鑰就退回簡單版
+    if (!useSiliconFlow || !siliconClient) {
+      // 沒有金鑰就退回簡單版
       return getSimpleResponse(userMessage);
     }
 
@@ -119,12 +121,12 @@ async function getAIResponse(userId, userMessage) {
 
     history.push({ role: 'user', content: userMessage });
 
-    // 只保留最近 10 則
+    // 只保留最近 10 則對話
     if (history.length > 10) {
       history.splice(0, history.length - 10);
     }
 
-    const response = await openai.chat.completions.create({
+    const response = await siliconClient.chat.completions.create({
       model: MODEL_NAME,
       messages: [
         { role: 'system', content: GIRLFRIEND_PERSONA },
@@ -139,12 +141,12 @@ async function getAIResponse(userId, userMessage) {
 
     return reply;
   } catch (error) {
-    console.error('DeepSeek API Error:', error);
+    console.error('SiliconFlow API Error:', error);
     return getSimpleResponse(userMessage);
   }
 }
 
-// Webhook 路由
+// Webhook 路由（不要在這之前用 app.use(express.json()) 破壞原始 body）
 app.post('/webhook', middleware(lineConfig), async (req, res) => {
   try {
     const events = req.body.events;
@@ -159,7 +161,7 @@ app.post('/webhook', middleware(lineConfig), async (req, res) => {
         const userMessage = event.message.text;
 
         let replyText;
-        if (useDeepseek && openai) {
+        if (useSiliconFlow && siliconClient) {
           replyText = await getAIResponse(userId, userMessage);
         } else {
           replyText = getSimpleResponse(userMessage);
@@ -181,19 +183,19 @@ app.post('/webhook', middleware(lineConfig), async (req, res) => {
 
 // 健康檢查路由
 app.get('/', (req, res) => {
-  if (useDeepseek && openai) {
-    res.send(`LINE AI Girlfriend Bot is running with DeepSeek model: ${MODEL_NAME} 💕`);
+  if (useSiliconFlow && siliconClient) {
+    res.send(`LINE AI Girlfriend Bot is running with SiliconFlow model: ${MODEL_NAME} 💕`);
   } else {
-    res.send('LINE Girlfriend Bot is running (simple keyword mode, no DeepSeek API key) 💕');
+    res.send('LINE Girlfriend Bot is running (simple keyword mode, no SiliconFlow API key) 💕');
   }
 });
 
 // 啟動伺服器
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  if (useDeepseek && openai) {
-    console.log(`🌸 小櫻 AI 版 Bot 已啟動，使用 DeepSeek 模型: ${MODEL_NAME}，監聽 port ${PORT}`);
+  if (useSiliconFlow && siliconClient) {
+    console.log(`🌸 小櫻 AI 版 Bot 已啟動，使用 SiliconFlow 模型: ${MODEL_NAME}，監聽 port ${PORT}`);
   } else {
-    console.log(`🌸 小櫻 簡單版 Bot 已啟動（未設定 DEEPSEEK_API_KEY），監聽 port ${PORT}`);
+    console.log(`🌸 小櫻 簡單版 Bot 已啟動（未設定 SILICONFLOW_API_KEY），監聽 port ${PORT}`);
   }
 });
